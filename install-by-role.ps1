@@ -6,7 +6,12 @@ param(
     [ValidateSet('WebServer','WebAppServer','AppServer')]
     [string[]]$Roles,
 
-    [switch]$AllRoles
+    [switch]$AllRoles,
+
+    [string]$WebPoolDomain,
+    [string]$WebPoolUser,
+    [string]$WebPoolPassword,
+    [string]$ServicePassword
 )
 
 Set-StrictMode -Version Latest
@@ -22,24 +27,37 @@ $RoleConfig = @{
     WebServer = @{
         SharePath = '\\share\Web'
         Packages  = @(
-            @{ FileName = 'WebCore.msi';     Application = 'WebCore';     ApplicationShortName = 'WebCore';     MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = 'W3SVC' },
-            @{ FileName = 'WebTools.msi';    Application = 'WebTools';    ApplicationShortName = 'WebTools';    MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = '' }
+            @{
+                FileName             = 'WebCore.msi'
+                Application          = 'WebCore'
+                ApplicationShortName = 'WebCore'
+                MSIArguments         = 'ADDDEFAULT=WebServicesFeature,WebSvcVirtualDirectoryFeature,WebSvcFirstTimeInstallationFeature'
+                MSIProperties        = @('WEBSVC_APP_POOL_DOMAIN', 'WEBSVC_APP_POOL_USERNAME', 'WEBSVC_APP_POOL_PASSWORD')
+                ServiceName          = 'W3SVC'
+            },
+            @{ FileName = 'WebTools.msi'; Application = 'WebTools'; ApplicationShortName = 'WebTools'; MSIArguments = ''; ServiceName = '' }
         )
     }
     WebAppServer = @{
         SharePath = '\\share\WebApp'
         Packages  = @(
-            @{ FileName = 'WebAppRuntime.msi'; Application = 'WebAppRuntime'; ApplicationShortName = 'WebAppRuntime'; MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = 'MyWebAppSvc' },
-            @{ FileName = 'WebAppApi.msi';     Application = 'WebAppApi';     ApplicationShortName = 'WebAppApi';     MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = '' }
+            @{ FileName = 'WebAppRuntime.msi'; Application = 'WebAppRuntime'; ApplicationShortName = 'WebAppRuntime'; MSIArguments = ''; ServiceName = 'MyWebAppSvc' },
+            @{ FileName = 'WebAppApi.msi'; Application = 'WebAppApi'; ApplicationShortName = 'WebAppApi'; MSIArguments = ''; ServiceName = '' }
         )
     }
     AppServer = @{
         SharePath = '\\share\App'
         Packages  = @(
-            @{ FileName = 'AppCore.msi';      Application = 'AppCore';      ApplicationShortName = 'AppCore';      MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = 'MyAppSvc' },
-            @{ FileName = 'AppWorker.msi';    Application = 'AppWorker';    ApplicationShortName = 'AppWorker';    MSIArguments = 'REBOOT=ReallySuppress'; ServiceName = 'MyWorkerSvc' }
+            @{ FileName = 'AppCore.msi'; Application = 'AppCore'; ApplicationShortName = 'AppCore'; MSIArguments = ''; ServiceName = 'MyAppSvc' },
+            @{ FileName = 'AppWorker.msi'; Application = 'AppWorker'; ApplicationShortName = 'AppWorker'; MSIArguments = ''; ServiceName = 'MyWorkerSvc' }
         )
     }
+}
+
+$InstallerPropertyValues = @{
+    WEBSVC_APP_POOL_DOMAIN   = $WebPoolDomain
+    WEBSVC_APP_POOL_USERNAME = $WebPoolUser
+    WEBSVC_APP_POOL_PASSWORD = $WebPoolPassword
 }
 
 function Install-MsiPackage {
@@ -55,6 +73,7 @@ function Install-MsiPackage {
         [string]$ApplicationShortName,
 
         [string]$MSIArguments,
+        [string[]]$MSIProperties,
         [string]$ServicePassword,
         [string]$ServiceName
     )
@@ -64,12 +83,36 @@ function Install-MsiPackage {
             $suffix = Get-Date -Format 'yyyyMMddHHmmss'
             $logFile = Join-Path $LogRoot "install-$ApplicationShortName-$suffix.log"
 
+            $propertyArguments = @()
+            if ($MSIProperties) {
+                foreach ($propertyName in $MSIProperties) {
+                    if ($InstallerPropertyValues[$propertyName]) {
+                        $propertyValue = $InstallerPropertyValues[$propertyName]
+                        $propertyArguments += "$propertyName=`"$propertyValue`""
+                    }
+                }
+            }
+
+            $ArgumentParts = @(
+                "/i `"$MSIPath`""
+                $MSIArguments
+            )
+
+            if ($propertyArguments.Count -gt 0) {
+                $ArgumentParts += ($propertyArguments -join ' ')
+            }
+
             if ($ServicePassword) {
-                $InstallCommand = "/i `"$MSIPath`" $MSIArguments SERVICEPASSWORD=$ServicePassword REBOOT=ReallySuppress /qn /lv `"$logFile`""
+                $ArgumentParts += "SERVICEPASSWORD=$ServicePassword"
             }
-            else {
-                $InstallCommand = "/i `"$MSIPath`" $MSIArguments REBOOT=ReallySuppress /qn /lv `"$logFile`""
-            }
+
+            $ArgumentParts += @(
+                'REBOOT=ReallySuppress'
+                '/qn'
+                "/lv `"$logFile`""
+            )
+
+            $InstallCommand = (($ArgumentParts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' ')
 
             Write-Host "--- InstallCommand: $InstallCommand"
             $process = Start-Process -Wait -FilePath 'msiexec.exe' -ArgumentList $InstallCommand -PassThru
@@ -155,8 +198,9 @@ try {
                 -Application $package.Application `
                 -ApplicationShortName $package.ApplicationShortName `
                 -MSIArguments $package.MSIArguments `
+                -MSIProperties $package.MSIProperties `
                 -ServiceName $package.ServiceName `
-                -ServicePassword $package.ServicePassword
+                -ServicePassword $ServicePassword
         }
     }
 
